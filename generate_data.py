@@ -71,12 +71,17 @@ def sample(arr, p):
     return arr[np.random.choice(len(arr), int(len(arr)*p), replace=False)]
 
 
-def generate_all_data():
+def generate_all_data(random=True):
     data = {}
     for op in ops:
         data[op.name] = {}
         for p in np.arange(0.2, 0.85, 0.05):
-            data[op.name][p] = sample(randomize_vals(op.gen_data()), p)
+            vals = op.gen_data()
+            if random:
+                vals = randomize_vals(vals)
+            train = torch.tensor(sample(vals, p), dtype=torch.long)
+            # TODO: kinda of jank, we're technically also predicting y. maybe bad?
+            data[op.name][f"{p:.2f}"] = train[:,:2], train[:,1:]
     return data
 
 #import code; code.interact(local=locals())
