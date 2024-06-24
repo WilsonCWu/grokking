@@ -81,7 +81,7 @@ def generate_all_data(random=True):
                 vals = randomize_vals(vals)
             train = torch.tensor(sample(vals, p), dtype=torch.long)
             # TODO: kinda of jank, we're technically also predicting y. maybe bad?
-            data[op.name][f"{p:.2f}"] = train[:,:2], train[:,1:]
+            data[op.name][f"{p:.2f}"] = train[:,:2].contiguous(), train[:,1:].contiguous()
     return data
 
 #import code; code.interact(local=locals())
