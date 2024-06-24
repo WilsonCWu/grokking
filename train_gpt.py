@@ -123,9 +123,11 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
         loss = None
+        accuracy = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-        return logits, loss
+            accuracy = (logits.argmax(dim=-1) == targets).float().mean()
+        return logits, loss, accuracy
 
 
     def configure_optimizers(self, weight_decay, learning_rate, device_type):
@@ -296,7 +298,7 @@ for step in range(max_steps):
         if ddp:
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
+            logits, loss, accuracy = model(x, y)
         # we have to scale the loss to account for gradient accumulation,
         # because the gradients just add on each successive backward().
         # addition of gradients corresponds to a SUM in the objective, but
@@ -319,7 +321,8 @@ for step in range(max_steps):
     tokens_processed = x.shape[0] * x.shape[1] * grad_accum_steps * ddp_world_size
     tokens_per_sec = tokens_processed / dt
     if master_process:
-        print(f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+        print(f"TODO: need to get accuracy of only final token")
+        print(f"step {step:5d} | accuracy: {accuracy:.2f} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
         with open(log_file, "a") as f:
             f.write(f"{step} train {loss_accum.item():.6f}\n")
 
