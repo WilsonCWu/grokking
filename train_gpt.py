@@ -125,8 +125,10 @@ class GPT(nn.Module):
         loss = None
         accuracy = None
         if targets is not None:
+            # TODO: should we even calculate loss for the first token? it's annoying to get rid of it
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-            accuracy = (logits.argmax(dim=-1) == targets).float().mean()
+            # accuracy is only of the final token
+            accuracy = (logits.argmax(dim=-1)[:,1] == targets[:,1]).float().mean()
         return logits, loss, accuracy
 
 
@@ -156,7 +158,10 @@ class GPT(nn.Module):
         return optimizer
 # -----------------------------------------------------------------------------
 from generate_data import generate_all_data
-x,y = generate_all_data(random=False)["+"]["0.80"]
+x_train, y_train, = generate_all_data(random=False)["+"]["0.25"]["train"]
+x_val, y_val = generate_all_data(random=False)["+"]["0.25"]["val"]
+print(f"train x: {x_train.shape}, train y: {y_train.shape}")
+print(f"val x: {x_val.shape}, val y: {y_val.shape}")
 """
 from generate_data import generate_all_data
 x,y = generate_all_data(random=False)["+"]["0.80"]
@@ -250,51 +255,32 @@ log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
     pass
 
+def sample_batch(x, y, B):
+    indices = torch.randperm(len(x))[:B]
+    return x[indices], y[indices]
+x_val, y_val = x_val.to(device), y_val.to(device)
 for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
 
     # once in a while evaluate our validation loss
-    if False: #step % 250 == 0 or last_step:
+    if True: #step % 250 == 0 or last_step:
         model.eval()
-        val_loader.reset()
         with torch.no_grad():
-            val_loss_accum = 0.0
-            val_loss_steps = 20
-            for _ in range(val_loss_steps):
-                x, y = val_loader.next_batch()
-                x, y = x.to(device), y.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
-                loss = loss / val_loss_steps
-                val_loss_accum += loss.detach()
-        if ddp:
-            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
-        if master_process:
-            print(f"validation loss: {val_loss_accum.item():.4f}")
-            with open(log_file, "a") as f:
-                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % 5000 == 0 or last_step):
-                # optionally write model checkpoints
-                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'config': raw_model.config,
-                    'step': step,
-                    'val_loss': val_loss_accum.item()
-                }
-                # you might also want to add optimizer.state_dict() and
-                # rng seeds etc., if you wanted to more exactly resume training
-                torch.save(checkpoint, checkpoint_path)
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                logits, loss, accuracy = model(x_val, y_val)
+        print(f"validation accuracy: {accuracy:.2f} | validation loss: {loss.item():.4f}")
+        with open(log_file, "a") as f:
+            f.write(f"{step} val {accuracy:.4f}\n")
 
     # do one step of the optimization
     model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
     for micro_step in range(grad_accum_steps):
-        x, y = x,y # TODO: get data
+        # sample B from x_train and y_train
+        x, y = sample_batch(x_train, y_train, B)
         x, y = x.to(device), y.to(device)
-        # added after video, this field is also used by the forward pass.
         if ddp:
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
@@ -321,10 +307,9 @@ for step in range(max_steps):
     tokens_processed = x.shape[0] * x.shape[1] * grad_accum_steps * ddp_world_size
     tokens_per_sec = tokens_processed / dt
     if master_process:
-        print(f"TODO: need to get accuracy of only final token")
         print(f"step {step:5d} | accuracy: {accuracy:.2f} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
         with open(log_file, "a") as f:
-            f.write(f"{step} train {loss_accum.item():.6f}\n")
+            f.write(f"{step} train {accuracy:.4f}\n")
 
 if ddp:
     destroy_process_group()

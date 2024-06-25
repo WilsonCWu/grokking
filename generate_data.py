@@ -66,9 +66,6 @@ def unrandomize_vals(v):
     return mapping_inv[v]
 unrandomize_vals = np.vectorize(unrandomize_vals)
 
-def sample(arr, p):
-    np.random.seed(42)
-    return arr[np.random.choice(len(arr), int(len(arr)*p), replace=False)]
 
 
 def generate_all_data(random=True):
@@ -79,9 +76,16 @@ def generate_all_data(random=True):
             vals = op.gen_data()
             if random:
                 vals = randomize_vals(vals)
-            train = torch.tensor(sample(vals, p), dtype=torch.long)
+            np.random.seed(42)
+            np.random.shuffle(vals)
+            split_i = int(len(vals)*p)
+            train = torch.tensor(vals[:split_i], dtype=torch.long)
+            val = torch.tensor(vals[split_i:split_i+512], dtype=torch.long)
             # TODO: kinda of jank, we're technically also predicting y. maybe bad?
-            data[op.name][f"{p:.2f}"] = train[:,:2].contiguous(), train[:,1:].contiguous()
+            data[op.name][f"{p:.2f}"] = {
+                "train": (train[:,:2].contiguous(), train[:,1:].contiguous()),
+                "val": (val[:,:2].contiguous(), val[:,1:].contiguous()),
+            }
     return data
 
 #import code; code.interact(local=locals())
