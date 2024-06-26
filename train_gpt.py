@@ -173,6 +173,27 @@ import code; code.interact(local=locals())
 exit()
 """
 # -----------------------------------------------------------------------------
+# https://arxiv.org/html/2405.20233v2/
+from collections import deque
+from typing import Dict, Optional, Literal
+import torch
+import torch.nn as nn
+def gradfilter_ema(
+    m: nn.Module,
+    grads: Optional[Dict[str, torch.Tensor]] = None,
+    alpha: float = 0.98,
+    lamb: float = 2.0,
+) -> Dict[str, torch.Tensor]:
+    if grads is None:
+        grads = {n: p.grad.data.detach() for n, p in m.named_parameters() if p.requires_grad and p.grad is not None}
+
+    for n, p in m.named_parameters():
+        if p.requires_grad and p.grad is not None:
+            grads[n] = grads[n] * alpha + p.grad.data.detach() * (1 - alpha)
+            p.grad.data = p.grad.data + grads[n] * lamb
+
+    return grads
+# -----------------------------------------------------------------------------
 # simple launch:
 # python train_gpt2.py
 # DDP launch for e.g. 8 GPUs:
@@ -236,7 +257,7 @@ if use_compile:
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
-
+grokfast_grads = None
 max_lr = 1e-3
 warmup_steps = 10
 max_steps = int(1e5)
@@ -249,7 +270,7 @@ def get_lr(it):
 optimizer = raw_model.configure_optimizers(weight_decay=1, learning_rate=max_lr, device_type=device_type)
 
 # create the log directory we will write checkpoints to and log to
-log_dir = "log"
+log_dir = "log_grokfast"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
@@ -294,6 +315,7 @@ for step in range(max_steps):
         loss.backward()
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+    grokfast_grads = gradfilter_ema(model, grads=grokfast_grads)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate for this iteration
     lr = get_lr(step)
