@@ -34,6 +34,10 @@ ops = [
         lambda x,y: (x+y)%mod_p
     ),
     Op(
+        "*",
+        lambda x,y: (x*y)%mod_p
+    ),
+    Op(
         "-",
         lambda x,y: (x-y)%mod_p
     ),
@@ -80,11 +84,17 @@ def generate_all_data(random=True):
             np.random.shuffle(vals)
             split_i = int(len(vals)*p)
             train = torch.tensor(vals[:split_i], dtype=torch.long)
+            train_x = train[:,:2].contiguous()
+            train_y = torch.zeros_like(train_x, dtype=torch.long)
+            train_y[:,1] = train[:,2]
             val = torch.tensor(vals[split_i:split_i+512], dtype=torch.long)
-            # TODO: kinda of jank, we're technically also predicting y. maybe bad?
+            val_x = val[:,:2].contiguous()
+            val_y = torch.zeros_like(val_x, dtype=torch.long)
+            val_y[:,1] = val[:,2]
+            #import code; code.interact(local=locals())
             data[op.name][f"{p:.2f}"] = {
-                "train": (train[:,:2].contiguous(), train[:,1:].contiguous()),
-                "val": (val[:,:2].contiguous(), val[:,1:].contiguous()),
+                "train": (train_x, train_y),
+                "val": (val_x, val_y),
             }
     return data
 

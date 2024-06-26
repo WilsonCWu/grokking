@@ -146,22 +146,31 @@ class GPT(nn.Module):
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        if master_process:
+        if not args.quiet:
             print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
             print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == "cuda"
-        if master_process:
+        if not args.quiet:
             print(f"using fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.98), eps=1e-8, fused=use_fused)
         return optimizer
 # -----------------------------------------------------------------------------
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("op")
+parser.add_argument("p")
+parser.add_argument("--use_grokfast", action="store_true")
+parser.add_argument("--quiet", action="store_true")
+args = parser.parse_args()
+# -----------------------------------------------------------------------------
 from generate_data import generate_all_data
-x_train, y_train, = generate_all_data(random=False)["+"]["0.25"]["train"]
-x_val, y_val = generate_all_data(random=False)["+"]["0.25"]["val"]
-print(f"train x: {x_train.shape}, train y: {y_train.shape}")
-print(f"val x: {x_val.shape}, val y: {y_val.shape}")
+x_train, y_train, = generate_all_data(random=True)[args.op][args.p]["train"]
+x_val, y_val = generate_all_data(random=True)[args.op][args.p]["val"]
+if not args.quiet:
+    print(f"train x: {x_train.shape}, train y: {y_train.shape}")
+    print(f"val x: {x_val.shape}, val y: {y_val.shape}")
 """
 from generate_data import generate_all_data
 x,y = generate_all_data(random=False)["+"]["0.80"]
@@ -194,41 +203,15 @@ def gradfilter_ema(
 
     return grads
 # -----------------------------------------------------------------------------
-# simple launch:
-# python train_gpt2.py
-# DDP launch for e.g. 8 GPUs:
-# torchrun --standalone --nproc_per_node=8 train_gpt2.py
 
 # run the training loop
-from torch.distributed import init_process_group, destroy_process_group
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.distributed as dist
 
-# set up DDP (distributed data parallel).
-# torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
-ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
-if ddp:
-    # use of DDP atm demands CUDA, we set the device appropriately according to rank
-    assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
-    init_process_group(backend='nccl')
-    ddp_rank = int(os.environ['RANK'])
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
-    device = f'cuda:{ddp_local_rank}'
-    torch.cuda.set_device(device)
-    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-else:
-    # vanilla, non-DDP run
-    ddp_rank = 0
-    ddp_local_rank = 0
-    ddp_world_size = 1
-    master_process = True
-    # attempt to autodetect device
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "mps"
+device = "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = "mps"
+if not args.quiet:
     print(f"using device: {device}")
 
 # added after video, pytorch can be serious about it's device vs. device_type distinction
@@ -241,7 +224,7 @@ if torch.cuda.is_available():
 B = 512 # micro batch size
 T = 2 # sequence length
 grad_accum_steps = 1
-if master_process:
+if not args.quiet:
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
 
@@ -254,9 +237,7 @@ model.to(device)
 use_compile = False # torch.compile interferes with HellaSwag eval and Generation. TODO fix
 if use_compile:
     model = torch.compile(model)
-if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
-raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
+raw_model = model # always contains the "raw" unwrapped model
 grokfast_grads = None
 max_lr = 1e-3
 warmup_steps = 10
@@ -270,7 +251,9 @@ def get_lr(it):
 optimizer = raw_model.configure_optimizers(weight_decay=1, learning_rate=max_lr, device_type=device_type)
 
 # create the log directory we will write checkpoints to and log to
-log_dir = "log_grokfast"
+log_dir = f"log_{args.op}_{args.p}"
+if args.use_grokfast:
+    log_dir += "_grokfast_TODOARGS"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
@@ -290,9 +273,12 @@ for step in range(max_steps):
         with torch.no_grad():
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss, accuracy = model(x_val, y_val)
-        print(f"validation accuracy: {accuracy:.2f} | validation loss: {loss.item():.4f}")
+        if not args.quiet:
+            print(f"validation accuracy: {accuracy:.2f} | validation loss: {loss.item():.4f}")
         with open(log_file, "a") as f:
             f.write(f"{step} val {accuracy:.4f}\n")
+        if accuracy >= 0.98:
+            break
 
     # do one step of the optimization
     model.train()
@@ -302,8 +288,6 @@ for step in range(max_steps):
         # sample B from x_train and y_train
         x, y = sample_batch(x_train, y_train, B)
         x, y = x.to(device), y.to(device)
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             logits, loss, accuracy = model(x, y)
         # we have to scale the loss to account for gradient accumulation,
@@ -313,9 +297,8 @@ for step in range(max_steps):
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
         loss.backward()
-    if ddp:
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-    grokfast_grads = gradfilter_ema(model, grads=grokfast_grads)
+    if args.use_grokfast:
+        grokfast_grads = gradfilter_ema(model, grads=grokfast_grads)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate for this iteration
     lr = get_lr(step)
@@ -326,12 +309,9 @@ for step in range(max_steps):
         torch.cuda.synchronize() # wait for the GPU to finish work
     t1 = time.time()
     dt = t1 - t0 # time difference in seconds
-    tokens_processed = x.shape[0] * x.shape[1] * grad_accum_steps * ddp_world_size
+    tokens_processed = x.shape[0] * x.shape[1] * grad_accum_steps
     tokens_per_sec = tokens_processed / dt
-    if master_process:
+    if not args.quiet:
         print(f"step {step:5d} | accuracy: {accuracy:.2f} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
-        with open(log_file, "a") as f:
-            f.write(f"{step} train {accuracy:.4f}\n")
-
-if ddp:
-    destroy_process_group()
+    with open(log_file, "a") as f:
+        f.write(f"{step} train {accuracy:.4f}\n")
